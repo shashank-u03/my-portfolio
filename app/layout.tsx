@@ -25,6 +25,13 @@ export const metadata: Metadata = {
     template: `%s | ${siteMetadata.title}`,
   },
   description: siteMetadata.description,
+  icons: {
+    icon: [
+      { url: '/static/favicons/favicon-16x16.png', sizes: '16x16', type: 'image/png' },
+      { url: '/static/favicons/favicon-32x32.png', sizes: '32x32', type: 'image/png' },
+    ],
+    apple: '/static/favicons/apple-touch-icon.png',
+  },
   openGraph: {
     title: siteMetadata.title,
     description: siteMetadata.description,
@@ -69,7 +76,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     >
       <link
         rel="apple-touch-icon"
-        sizes="76x76"
+        sizes="180x180"
         href={`${basePath}/static/favicons/apple-touch-icon.png`}
       />
       <link
