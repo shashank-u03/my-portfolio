@@ -1,5 +1,5 @@
 import { defineDocumentType, ComputedFields, makeSource } from 'contentlayer2/source-files'
-import { writeFileSync } from 'fs'
+import { writeFileSync, existsSync } from 'fs'
 import readingTime from 'reading-time'
 import { slug } from 'github-slugger'
 import path from 'path'
@@ -23,7 +23,9 @@ import rehypeCitation from 'rehype-citation'
 import rehypePrismPlus from 'rehype-prism-plus'
 import rehypePresetMinify from 'rehype-preset-minify'
 import siteMetadata from './data/siteMetadata'
-import { allCoreContent, sortPosts } from 'pliny/utils/contentlayer.js'
+import openSourceData from './data/openSourceData'
+import researchData from './data/researchData'
+import { sortPosts } from 'pliny/utils/contentlayer.js'
 import prettier from 'prettier'
 
 const root = process.cwd()
@@ -50,7 +52,7 @@ const computedFields: ComputedFields = {
   },
   path: {
     type: 'string',
-    resolve: (doc) => doc._raw.flattenedPath,
+    resolve: (doc) => doc._raw.flattenedPath.replace(/^blog\//, 'blogs/'),
   },
   filePath: {
     type: 'string',
@@ -80,14 +82,106 @@ async function createTagCount(allBlogs) {
   writeFileSync('./app/tag-data.json', formatted)
 }
 
-function createSearchIndex(allBlogs) {
+function createSearchIndex(allBlogs, allAuthors) {
   if (
     siteMetadata?.search?.provider === 'kbar' &&
     siteMetadata.search.kbarConfig.searchDocumentsPath
   ) {
+    const documents = []
+
+    sortPosts(allBlogs)
+      .filter((post) => !isProduction || post.draft !== true)
+      .filter((post) => existsSync(path.join(root, 'data', post.filePath)))
+      .forEach((post) => {
+        documents.push({
+          id: post.path,
+          title: post.title,
+          content: [post.title, post.summary, post.tags?.join(' '), post.body.raw]
+            .filter(Boolean)
+            .join(' '),
+          section: 'Blog',
+          url: `/${post.path}`,
+          subtitle: post.tags?.join(', '),
+        })
+      })
+
+    openSourceData.forEach((item) => {
+      documents.push({
+        id: `opensource-${item.href}`,
+        title: item.title,
+        content: [item.title, item.description, item.project].join(' '),
+        section: 'Open Source',
+        url: '/open-source',
+        subtitle: item.project,
+      })
+    })
+
+    researchData.forEach((item) => {
+      documents.push({
+        id: `research-${item.href}`,
+        title: item.title,
+        content: [item.title, item.abstract, item.journal, item.volumeIssue].join(' '),
+        section: 'Research',
+        url: '/research',
+        subtitle: `${item.journal} — ${item.volumeIssue}`,
+      })
+    })
+
+    allAuthors.forEach((author) => {
+      documents.push({
+        id: `author-${author._raw.flattenedPath}`,
+        title: author.name,
+        content: [author.name, author.occupation, author.company, author.body.raw]
+          .filter(Boolean)
+          .join(' '),
+        section: 'About',
+        url: '/about',
+        subtitle: author.occupation,
+      })
+    })
+
+    const staticPages = [
+      {
+        id: 'page-home',
+        title: 'Home',
+        content: siteMetadata.description,
+        section: 'Pages',
+        url: '/',
+      },
+      {
+        id: 'page-blog',
+        title: 'Blogs',
+        content: 'Blog posts and articles',
+        section: 'Pages',
+        url: '/blogs',
+      },
+      {
+        id: 'page-open-source',
+        title: 'Open Source',
+        content: 'Contributions to open source projects Webpack Module Federation',
+        section: 'Pages',
+        url: '/open-source',
+      },
+      {
+        id: 'page-research',
+        title: 'Research',
+        content: 'Academic publications and research work IEEE UAV swarm QL-DBO',
+        section: 'Pages',
+        url: '/research',
+      },
+      {
+        id: 'page-about',
+        title: 'About',
+        content: 'About me profile',
+        section: 'Pages',
+        url: '/about',
+      },
+    ]
+    documents.push(...staticPages)
+
     writeFileSync(
       `public/${path.basename(siteMetadata.search.kbarConfig.searchDocumentsPath)}`,
-      JSON.stringify(allCoreContent(sortPosts(allBlogs)))
+      JSON.stringify(documents)
     )
     console.log('Local search index generated...')
   }
@@ -122,7 +216,7 @@ export const Blog = defineDocumentType(() => ({
         dateModified: doc.lastmod || doc.date,
         description: doc.summary,
         image: doc.images ? doc.images[0] : siteMetadata.socialBanner,
-        url: `${siteMetadata.siteUrl}/${doc._raw.flattenedPath}`,
+        url: `${siteMetadata.siteUrl}/${doc._raw.flattenedPath.replace(/^blog\//, 'blogs/')}`,
       }),
     },
   },
@@ -142,6 +236,7 @@ export const Authors = defineDocumentType(() => ({
     bluesky: { type: 'string' },
     linkedin: { type: 'string' },
     github: { type: 'string' },
+    googleScholar: { type: 'string' },
     layout: { type: 'string' },
   },
   computedFields,
@@ -180,8 +275,8 @@ export default makeSource({
     ],
   },
   onSuccess: async (importData) => {
-    const { allBlogs } = await importData()
+    const { allBlogs, allAuthors } = await importData()
     createTagCount(allBlogs)
-    createSearchIndex(allBlogs)
+    createSearchIndex(allBlogs, allAuthors)
   },
 })

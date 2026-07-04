@@ -1,0 +1,199 @@
+---
+title: 'Finding a Redundant Traversal in Webpack With CPU Profiling'
+date: '2026-07-05'
+lastmod: '2026-07-05'
+tags: ['webpack', 'performance', 'cpu-profiling', 'module-federation', 'open-source']
+draft: true
+summary: 'How CPU profiling revealed an unguarded moduleGraph.isDeferred() call in webpack ConcatenatedModule, the fix that landed upstream in webpack >= 5.108.0, and roughly 11 minutes saved on a large Module Federation build.'
+images: ['/static/images/build-profile-before-overview.png']
+---
+
+## Introduction
+
+After [profiling a production build](/blogs/cpu-profiling-build-bottlenecks) on a large codebase with Module Federation, the bottom-up view pointed to `moduleGraph.isDeferred()` inside `ConcatenatedModule._getModulesWithInfo()`. The function was invoked thousands of times per build. Every call returned `false` — but only after walking the module's full incoming connection list.
+
+The project never enabled `experiments.deferImport`. The traversal was provably redundant.
+
+This post traces the code path, explains why it is expensive at scale, and covers the two-line fix that landed as [webpack#21096](https://github.com/webpack/webpack/pull/21096) — now shipped in [webpack@5.108.0](https://newreleases.io/project/github/webpack/webpack/release/v5.108.0).
+
+<TOCInline toc={props.toc} exclude="Introduction" />
+
+## The Symptom
+
+The project uses Module Federation with roughly ten remotes. Each remote is registered via `ContainerReferencePlugin` → `ExternalsPlugin`, creating an `ExternalModule` per remote in the webpack module graph.
+
+Build time had grown by roughly nine minutes. The stall sat between consecutive `optimizeChunkModules` hooks — inside webpack's seal phase, where `ConcatenatedModule` generates code for scope-hoisted bundles.
+
+The before CPU profile showed a sustained ~2 minute gap in that window. Bottom-up analysis attributed it to `ModuleGraph.isDeferred()` and `getIncomingConnections()`.
+
+## What the Profile Showed
+
+`isDeferred()` checks whether a module uses TC39's [deferred import evaluation](https://github.com/tc39/proposal-defer-import-eval). That is a real feature — but only when `experiments.deferImport` is enabled.
+
+Our build never set that flag. Yet webpack spent minutes in the check. The profile gave a precise call site; reading the source explained why.
+
+![cpupro showing isDeferred call sites — nested calls from _getModulesWithInfo and codeGeneration in ConcatenatedModule.js](/static/images/build-profile-before-callsites.png)
+
+The cpupro call tree view shows `isDeferred` being called repeatedly from `_getModulesWithInfo` in `ConcatenatedModule.js` (lines 2155, 2146) during `codeGeneration`. The ancestor call sites confirm the pattern: every code generation pass triggers the traversal.
+
+## The Code Path: Three Pillars
+
+Three independent webpack mechanisms intersect at the call site:
+
+![Three pillars diagram: ExternalsPlugin, deferImport, and ModuleConcatenation converging on an unguarded moduleGraph.isDeferred() call](/static/images/webpack-three-pillars-diagram.png)
+
+### Pillar 1: ExternalsPlugin creates ExternalModules
+
+Module Federation passes remotes into `ExternalsPlugin("script")`. Each remote becomes an `ExternalModule` with `externalType: "script"` in the module graph.
+
+### Pillar 2: deferImport defaults to off
+
+Webpack initialises experiments with `deferImport: false`:
+
+```js
+// lib/config/defaults.js
+D(experiments, "deferImport", false);
+```
+
+`HarmonyImportDependencyParserPlugin` uses `createGetImportPhase(deferImport=false)`, which always returns `ImportPhase.Evaluation`. No dependency in the graph ever gets `phase = ImportPhase.Defer`.
+
+`ImportPhaseUtils.isDefer(phase)` can never return `true`. Any `isDeferred()` call when the experiment is off is guaranteed to return `false` — but only after traversing incoming connections.
+
+### Pillar 3: ModuleConcatenationPlugin scope-hoists into ConcatenatedModule
+
+When `optimization.concatenateModules` is enabled, `ModuleConcatenationPlugin` merges modules into `ConcatenatedModule` instances. Modules not eligible for inner scope-hoisting — including `ExternalModule` remotes — remain as `type: "external"` entries in the concatenation list.
+
+During `compilation.codeGeneration()`, each `ConcatenatedModule` calls `_getModulesWithInfo()`:
+
+```js
+// lib/optimize/ConcatenatedModule.js — simplified
+case "external":
+  item = {
+    // ...
+    deferred: moduleGraph.isDeferred(info.module), // unguarded
+  };
+```
+
+Separately, `updateHash()` hits the same check:
+
+```js
+chunkGraph.moduleGraph.isDeferred(info.module) ? "1" : "0"
+```
+
+## Why isDeferred() Is Expensive at Scale
+
+`isDeferred()` is not a flag read. It walks the module's incoming connection list:
+
+```js
+isDeferred(module) {
+  if (this.isAsync(module)) return false;
+  const connections = this.getIncomingConnections(module);
+  for (const connection of connections) {
+    if (!(connection.dependency instanceof HarmonyImportDependency)) continue;
+    if (ImportPhaseUtils.isDefer(connection.dependency.phase)) return true;
+  }
+  return false;
+}
+```
+
+The time saved by guarding this call is:
+
+```
+T_saved = (number of isDeferred() calls) × (avg cost per call)
+```
+
+Where the average cost per call is proportional to the module's incoming connection count. Each call walks the full connection list before returning `false`.
+
+With externals — including federated remotes, shared libraries like React, and design system packages imported from outside the bundle — spread across many `ConcatenatedModule` instances, the traversal runs thousands of times per build. In practice, the majority of externals are **shared libraries** (React, React DOM, UI component libraries, etc.) rather than remotes. Every invocation returns `false`.
+
+## The Inconsistency
+
+`ModuleConcatenationPlugin` already guarded its own `isDeferred()` call:
+
+```js
+// lib/optimize/ModuleConcatenationPlugin.js
+const deferEnabled = compilation.options.experiments.deferImport;
+if (deferEnabled && moduleGraph.isDeferred(module)) {
+  setInnerBailoutReason(module, "Module is deferred");
+  canBeInner = false;
+}
+```
+
+The same `deferImport` feature introduced calls in `ConcatenatedModule` without the equivalent guard. The pattern existed in one file and was missing in the other.
+
+## The Fix
+
+Apply the same guard at both call sites in `ConcatenatedModule`:
+
+**`_getModulesWithInfo()`:**
+
+```js
+// before
+deferred: moduleGraph.isDeferred(info.module),
+
+// after
+deferred: this.compilation.options.experiments.deferImport
+  ? moduleGraph.isDeferred(info.module)
+  : false,
+```
+
+**`updateHash()`:**
+
+```js
+// before
+chunkGraph.moduleGraph.isDeferred(info.module) ? "1" : "0"
+
+// after
+(this.compilation.options.experiments.deferImport &&
+  chunkGraph.moduleGraph.isDeferred(info.module)) ? "1" : "0"
+```
+
+### Correctness
+
+When `deferImport` is `false`: the guard short-circuits to `false`. Semantically identical — the parser never emitted a deferred-phase dependency.
+
+When `deferImport` is `true`: behaviour is unchanged. The guard passes through to `isDeferred()` exactly as before.
+
+**Cache invalidation note:** The `updateHash()` fix changes the hash string format for external modules (from always calling `isDeferred()` to returning `"0"` directly when `deferImport` is off). This means upgrading to webpack >= 5.108.0 will produce different content hashes for chunks containing externals, invalidating filesystem caches from previous builds. Your first build after upgrading will be a full rebuild, but subsequent builds will benefit from both the performance fix and normal caching. The `_getModulesWithInfo()` fix alone accounts for the bulk of the performance regression.
+
+## Upstream Merge
+
+The PR [webpack#21096](https://github.com/webpack/webpack/pull/21096) was merged and is included in [webpack v5.108.0](https://newreleases.io/project/github/webpack/webpack/release/v5.108.0) and later releases under patch changes:
+
+> perf: guard isDeferred() behind experiments.deferImport in ConcatenatedModule (by @shashank-u03 in #21096)
+
+If you are on webpack **>= 5.108.0**, you already have the fix. Upgrade and re-profile to confirm the hotspot is gone.
+
+## Results
+
+After applying the patch locally (before the release shipped), the stall disappeared. Total production build time dropped by roughly **11 minutes**.
+
+### Before the fix
+
+![cpupro overview before the fix — 37 minute build, isDeferred at 39.9% self-time](/static/images/build-profile-before-overview.png)
+
+- **Total runtime:** 2,212,722ms (~37 minutes)
+- **`isDeferred` self-time:** 450,113ms (39.9%) — the top hotspot
+- webpack package: 883,568ms self-time (39.9%)
+
+### After the fix
+
+![cpupro overview after the fix — 26 minute build, isDeferred no longer in top entries](/static/images/build-profile-after-overview.png)
+
+- **Total runtime:** 1,581,306ms (~26 minutes)
+- **`isDeferred`:** no longer appears in the top self-time entries
+- webpack package: 388,059ms self-time (24.5%)
+
+The after profile shows `isDeferred()` and `getIncomingConnections()` no longer ranking in the bottom-up self-time view during code generation. The guard short-circuits before the traversal begins.
+
+## Takeaways
+
+1. **Default-off experiments can still impose default-on costs** — guard every call site, not just the plugin that owns the feature
+2. **Look for guard inconsistencies** — when a feature spans multiple files, check that each call site follows the same pattern
+3. **CPU profiling makes upstream fixes possible** — the fix is two conditionals; the profile is what made them findable
+
+## Closing
+
+If your webpack build uses externals — federated remotes, CDN scripts, Node.js builtins inside concatenated scopes — and build time has grown quietly, profile it. The bottleneck may be in webpack core, not your application code.
+
+For the profiling workflow itself, see [How to Find Build-Time Bottlenecks Using CPU Profiling](/blogs/cpu-profiling-build-bottlenecks).

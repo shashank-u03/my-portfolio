@@ -1,12 +1,15 @@
 import Image from './Image'
 import Link from './Link'
 
-const Card = ({ title, description, imgSrc, href }) => (
-  <div className="md max-w-[544px] p-4 md:w-1/2">
+const statusStyles = {
+  merged: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
+  open: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
+}
+
+const Card = ({ title, description, imgSrc, href, status, project, metrics }) => (
+  <div className="h-full">
     <div
-      className={`${
-        imgSrc && 'h-full'
-      } overflow-hidden rounded-md border-2 border-gray-200/60 dark:border-gray-700/60`}
+      className={`flex h-full flex-col overflow-hidden rounded-md border-2 border-gray-200/60 dark:border-gray-700/60`}
     >
       {imgSrc &&
         (href ? (
@@ -28,7 +31,21 @@ const Card = ({ title, description, imgSrc, href }) => (
             height={306}
           />
         ))}
-      <div className="p-6">
+      <div className="flex flex-grow flex-col p-6">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          {project && (
+            <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700 dark:bg-gray-800 dark:text-gray-300">
+              {project}
+            </span>
+          )}
+          {status && (
+            <span
+              className={`rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${statusStyles[status]}`}
+            >
+              {status}
+            </span>
+          )}
+        </div>
         <h2 className="mb-3 text-2xl leading-8 font-bold tracking-tight">
           {href ? (
             <Link href={href} aria-label={`Link to ${title}`}>
@@ -38,11 +55,13 @@ const Card = ({ title, description, imgSrc, href }) => (
             title
           )}
         </h2>
-        <p className="prose mb-3 max-w-none text-gray-500 dark:text-gray-400">{description}</p>
+        <p className="prose mb-3 flex-grow max-w-none text-gray-500 dark:text-gray-400">
+          {description}
+        </p>
         {href && (
           <Link
             href={href}
-            className="text-primary-500 hover:text-primary-600 dark:hover:text-primary-400 text-base leading-6 font-medium"
+            className="text-primary-500 hover:text-primary-600 dark:hover:text-primary-400 mt-auto text-base leading-6 font-medium"
             aria-label={`Link to ${title}`}
           >
             Learn more &rarr;
