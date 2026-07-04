@@ -1,0 +1,167 @@
+---
+title: 'How to Find Build-Time Bottlenecks Using CPU Profiling'
+date: '2026-07-04'
+lastmod: '2026-07-04'
+tags: ['performance', 'cpu-profiling', 'next-js', 'webpack']
+draft: true
+summary: 'A practical guide to capturing CPU profiles from Next.js production builds and using cpupro to isolate hotspots and form a hypothesis before diving into source code.'
+images: ['/static/images/twitter-card.png']
+---
+
+## Introduction
+
+When a production build slows down, the log tells you which phase ran — not which function consumed the CPU. Compilation, sealing, and code generation can each take minutes on a large codebase, and "webpack is slow" is not actionable.
+
+CPU profiling closes that gap. Node.js can record where the process spent time during `next build`, and tools like [cpupro](https://github.com/discoveryjs/cpupro) make large V8 profiles navigable. This post covers the full workflow: capture a profile, read the viewer, and isolate a hypothesis worth investigating in source code.
+
+<TOCInline toc={props.toc} exclude="Introduction" />
+
+## When Profiling Helps
+
+Reach for a CPU profile when:
+
+- Build time regressed without an obvious config change
+- A single phase (seal, optimize, code generation) dominates wall time
+- You suspect redundant work at scale — graph walks, repeated hashing, cache misses
+
+Profiling is less useful when the bottleneck is I/O (disk, network) or waiting on subprocesses. The profile will show idle gaps, not the root cause.
+
+## Step 1: Capture a CPU Profile During Build
+
+Node.js ships with a built-in CPU profiler. Passing `--cpu-prof` to the Node process that runs `next build` produces a `.cpuprofile` file when the build exits. No extra dependencies, no instrumentation inside application code.
+
+Most projects invoke `next build` through a package manager script. A thin wrapper forwards the profiler flags when needed.
+
+### Build wrapper script
+
+Create `scripts/build-with-cpu-profile.js`:
+
+```js
+const { spawnSync } = require('child_process');
+const path = require('path');
+
+const projectRoot = path.join(__dirname, '..');
+const nextBin = path.join(projectRoot, 'node_modules', '.bin', 'next');
+const enableCpuProfile = process.env.GENERATE_CPU_PROFILE === 'true';
+
+const nodeArgs = enableCpuProfile
+  ? ['--cpu-prof', '--cpu-prof-name=build.cpuprofile']
+  : [];
+
+const result = spawnSync(process.execPath, [...nodeArgs, nextBin, 'build'], {
+  stdio: 'inherit',
+  cwd: projectRoot,
+  env: process.env,
+});
+
+process.exit(result.status ?? 1);
+```
+
+### Wire it in package.json
+
+```json
+{
+  "scripts": {
+    "build": "node scripts/build-with-cpu-profile.js",
+    "build:profile": "GENERATE_CPU_PROFILE=true node scripts/build-with-cpu-profile.js"
+  }
+}
+```
+
+### How to run
+
+```bash
+# Dedicated script
+yarn build:profile
+
+# Or via env flag
+GENERATE_CPU_PROFILE=true yarn build
+```
+
+When the build completes, Node writes `build.cpuprofile` in the project root. That file is the input for analysis.
+
+**Practical notes:**
+
+- Profile a **production build**, not `next dev`. Dev mode has different hot paths and will mislead you.
+- Run on a machine with stable CPU load. Background contention distorts self-time rankings.
+- Add `*.cpuprofile` to `.gitignore`. These files are large.
+- **For K8s/CI runners:** If your production builds run on ephemeral Kubernetes runners, modify the script to upload the CPU profile to cloud storage (S3, GCS, etc.) and log the download link in the console. That way you can retrieve `build.cpuprofile` even after the runner terminates.
+
+## Step 2: Open the Profile
+
+Chrome DevTools can load `.cpuprofile` files (Performance → Load profile), but large webpack builds produce profiles that are slow to navigate there.
+
+[cpupro](https://github.com/discoveryjs/cpupro) is purpose-built for V8 CPU profiles of any size:
+
+- **Hosted viewer:** [discoveryjs.github.io/cpupro](https://discoveryjs.github.io/cpupro)
+- **CLI:** `npx cpupro build.cpuprofile`
+- **Source:** [github.com/discoveryjs/cpupro](https://github.com/discoveryjs/cpupro)
+
+Drop the file on the page or pass it to the CLI. The viewer embeds the data in an HTML report you can share with your team.
+
+## Step 3: Read the Viewer
+
+### Flamegraph (top-down)
+
+Start here for orientation. Tall, wide stacks show where the process spent continuous time. In a webpack build you expect compilation and code generation to dominate.
+
+Look for an unexpectedly wide plateau — a function that should be cheap but appears across many sibling stacks. That plateau is your first lead.
+
+### Bottom-up (self-time)
+
+Switch to bottom-up once you have a suspect area. Self-time ranks functions by CPU consumed **directly**, not through callees. This surfaces leaf functions called in tight loops.
+
+Sort by self-time and scan the top entries. If a graph-walking or hashing function ranks high despite sounding trivial, note it.
+
+### Function search and filtering
+
+Deep call graphs need filtering. Search for phase names you recognise from build logs (`optimizeChunkModules`, `codeGeneration`, `seal`) or for library paths (`webpack/lib/`).
+
+cpupro's search narrows the flamegraph to matching frames. Use it to confirm whether a suspect function is called thousands of times or only a handful.
+
+## Step 4: Form a Hypothesis
+
+Profiling gives you a **where** and a **how much**. The hypothesis connects that to **why**.
+
+A useful workflow:
+
+1. **Locate the stall** — find the widest time block in the flamegraph during the slow phase
+2. **Identify the hotspot** — bottom-up sort; note the top self-time functions
+3. **Check call frequency** — is the function invoked once or thousands of times?
+4. **Cross-reference graph shape** — externals count, chunk count, runtime count, plugin count
+5. **State the hypothesis** — e.g. "Function X walks the module graph on every external entry; with N externals and M concatenated modules, that is N×M redundant traversals"
+
+A good hypothesis is falsifiable. You should be able to grep the source, read the call site, and confirm or reject it without guessing.
+
+### Example signals
+
+| Signal in profile | Likely hypothesis |
+|---|---|
+| Same leaf function, high self-time, many invocations | Redundant per-item work in a loop |
+| Wide plateau in one plugin's code path | Algorithmic cost in that plugin |
+| Flat distribution, no dominant function | Many small costs; consider a different approach (build cache, fewer entries) |
+| Gap with no samples | I/O wait or subprocess; profiling won't help |
+
+## Step 5: Validate Before Fixing
+
+The profile is evidence, not proof. Before opening a PR:
+
+- Read the source at the call site identified in the profile
+- Confirm the expensive path is reachable in your configuration
+- Check whether a feature flag or experiment gates the work (and whether it is enabled)
+- Estimate whether skipping the work changes output (correctness check)
+
+If the hypothesis holds, you have a targeted fix. If not, profile again after eliminating the false lead.
+
+## Takeaways
+
+1. **Profile production builds** — `yarn build:profile` with Node's `--cpu-prof` is enough to start
+2. **Use cpupro for large profiles** — better filtering and navigation than DevTools for webpack-scale builds
+3. **Bottom-up self-time finds loops** — the flamegraph shows structure; self-time finds repetition
+4. **End with a falsifiable hypothesis** — the profile tells you where to read code, not what to change
+
+## What's Next
+
+This workflow is general. The same steps apply whether the hotspot is in your application bundler config, a webpack plugin, or upstream in webpack core.
+
+In a follow-up post, I walk through a concrete case: using this process to find a redundant `moduleGraph.isDeferred()` traversal in webpack's `ConcatenatedModule`, land [webpack#21096](https://github.com/webpack/webpack/pull/21096), and cut roughly 32% from a production build.
