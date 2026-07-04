@@ -15,11 +15,15 @@ interface SearchDocument {
 
 export default function SearchProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter()
+  const searchDocumentsPath =
+    siteMetadata.search?.provider === 'kbar'
+      ? siteMetadata.search.kbarConfig.searchDocumentsPath
+      : '/search.json'
 
   return (
     <KBarSearchProvider
       kbarConfig={{
-        searchDocumentsPath: siteMetadata.search.kbarConfig.searchDocumentsPath,
+        searchDocumentsPath,
         defaultActions: [
           {
             id: 'homepage',

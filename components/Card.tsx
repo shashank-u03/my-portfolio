@@ -4,9 +4,18 @@ import Link from './Link'
 const statusStyles = {
   merged: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
   open: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
+} as const
+
+type CardProps = {
+  title: string
+  description: string
+  href?: string
+  imgSrc?: string
+  status?: keyof typeof statusStyles
+  project?: string
 }
 
-const Card = ({ title, description, imgSrc, href, status, project, metrics }) => (
+const Card = ({ title, description, imgSrc, href, status, project }: CardProps) => (
   <div className="h-full">
     <div
       className={`flex h-full flex-col overflow-hidden rounded-md border-2 border-gray-200/60 dark:border-gray-700/60`}
@@ -55,7 +64,7 @@ const Card = ({ title, description, imgSrc, href, status, project, metrics }) =>
             title
           )}
         </h2>
-        <p className="prose mb-3 flex-grow max-w-none text-gray-500 dark:text-gray-400">
+        <p className="prose mb-3 max-w-none flex-grow text-gray-500 dark:text-gray-400">
           {description}
         </p>
         {href && (

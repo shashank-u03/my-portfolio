@@ -82,12 +82,21 @@ async function createTagCount(allBlogs) {
   writeFileSync('./app/tag-data.json', formatted)
 }
 
+type SearchDocument = {
+  id: string
+  title: string
+  content: string
+  section: string
+  url: string
+  subtitle?: string
+}
+
 function createSearchIndex(allBlogs, allAuthors) {
   if (
     siteMetadata?.search?.provider === 'kbar' &&
     siteMetadata.search.kbarConfig.searchDocumentsPath
   ) {
-    const documents = []
+    const documents: SearchDocument[] = []
 
     sortPosts(allBlogs)
       .filter((post) => !isProduction || post.draft !== true)
