@@ -1,7 +1,7 @@
 ---
 title: 'How to Find Build-Time Bottlenecks Using CPU Profiling'
 date: '2026-07-04'
-lastmod: '2026-07-04'
+lastmod: '2026-07-05'
 tags: ['performance', 'cpu-profiling', 'next-js', 'webpack']
 draft: false
 summary: 'A practical guide to capturing CPU profiles from Next.js production builds and using cpupro to isolate hotspots and form a hypothesis before diving into source code.'
@@ -26,6 +26,12 @@ Reach for a CPU profile when:
 
 Profiling is less useful when the bottleneck is I/O (disk, network) or waiting on subprocesses. The profile will show idle gaps, not the root cause.
 
+### Next.js adds its own layer
+
+This post uses `next build`, so the profile is **not** webpack alone. Next.js runs its own pipeline on top — page collection, static optimization, type checking (if enabled), and framework-specific webpack configuration. You will see frames under `next/dist/` alongside `webpack/` and `enhanced-resolve/`.
+
+When a wide block sits in Next.js code, do not assume webpack is at fault until you drill into callees. Conversely, a hotspot under `webpack/lib/` during `next build` is still webpack — Next.js is just the entry point that invoked it.
+
 ## Step 1: Capture a CPU Profile During Build
 
 Node.js ships with a built-in CPU profiler. Passing `--cpu-prof` to the Node process that runs `next build` produces a `.cpuprofile` file when the build exits. No extra dependencies, no instrumentation inside application code.
@@ -45,7 +51,12 @@ const nextBin = path.join(projectRoot, 'node_modules', '.bin', 'next');
 const enableCpuProfile = process.env.GENERATE_CPU_PROFILE === 'true';
 
 const nodeArgs = enableCpuProfile
-  ? ['--cpu-prof', '--cpu-prof-name=build.cpuprofile']
+  ? [
+      '--cpu-prof',
+      '--cpu-prof-name=build.cpuprofile',
+      // optional: '--cpu-prof-dir=/tmp/profiles',
+      // optional: '--cpu-prof-interval=500',
+    ]
   : [];
 
 const result = spawnSync(process.execPath, [...nodeArgs, nextBin, 'build'], {
@@ -80,6 +91,13 @@ GENERATE_CPU_PROFILE=true yarn build
 
 When the build completes, Node writes `build.cpuprofile` in the project root. That file is the input for analysis.
 
+### Profiler flags worth knowing
+
+Besides `--cpu-prof-name` (output filename):
+
+- **`--cpu-prof-dir`** — directory for the `.cpuprofile` file. Defaults to the current working directory. Useful in CI when you want profiles in a known upload path.
+- **`--cpu-prof-interval`** — sampling interval in **microseconds**. Default is **1000** (1 ms). Lower values (e.g. `500` or `250`) give finer granularity for short builds where 1 ms sampling can miss brief hotspots — at the cost of a larger profile file.
+
 **Practical notes:**
 
 - Profile a **production build**, not `next dev`. Dev mode has different hot paths and will mislead you.
@@ -101,23 +119,34 @@ Drop the file on the page or pass it to the CLI. The viewer embeds the data in a
 
 ## Step 3: Read the Viewer
 
+The sections below describe what to look for. Annotated screenshots from cpupro are included so you can match the prose to the UI.
+
 ### Flamegraph (top-down)
 
-Start here for orientation. Tall, wide stacks show where the process spent continuous time. In a webpack build you expect compilation and code generation to dominate.
+Start here for orientation. The timeline at the top spans the full build; each column is a stack sample, and **width is time**. Tall, wide stacks show where the process spent continuous time.
 
-Look for an unexpectedly wide plateau — a function that should be cheap but appears across many sibling stacks. That plateau is your first lead.
+In a webpack-powered `next build` you expect dense blocks under `processTicksAndRejections` — compilation, `seal`, chunk graph walks, and code generation. Also normal: purple `(garbage collector)` bands and grey `(idle)` gaps (I/O or waiting, not JavaScript CPU).
+
+Look for an unexpectedly **wide plateau** — a function that should be cheap but spans many columns at the same stack depth. In the profile below, the flat block around the `seal` / `visitModu…` region during minutes 17–21 is the kind of shape worth clicking into.
+
+![cpupro flamegraph — full build timeline with wide plateaus during webpack seal and code generation](/static/images/blog/cpu-profiling-build-bottlenecks/cpupro-flamegraph-plateau.png)
+
+### Call frames (drill-down)
+
+Click a plateau frame to open the **Call frames** tab. cpupro shows self-time vs nested time, a timeline slice for that function, and two trees:
+
+- **Nested call sites** — what the selected function called (callees). Here `seal` in `Compilation.js` spends ~179 s nested time mostly in `CALL_DELEGATE` hooks, `assignDepths`, and chunk-graph work — not in `seal` itself (93 ms self-time).
+- **Ancestor call sites** — how execution reached this frame (callers back to `Compiler.js`).
+
+Search (`seal`, `codeGeneration`, `webpack/lib/`) narrows the flamegraph first; call frames then tell you **which hook or helper** inside the phase owns the time.
+
+![cpupro Call frames tab — seal selected, timeline slice 17:17–21:46, nested and ancestor call sites](/static/images/blog/cpu-profiling-build-bottlenecks/call-frame.png)
 
 ### Bottom-up (self-time)
 
-Switch to bottom-up once you have a suspect area. Self-time ranks functions by CPU consumed **directly**, not through callees. This surfaces leaf functions called in tight loops.
+For leaf hotspots — especially repeated graph walks or hash calls — switch to **bottom-up** and sort by self-time. Self-time ranks functions by CPU consumed **directly**, not through callees. That view surfaces tight loops the call-frame tree can bury under deep delegate stacks.
 
-Sort by self-time and scan the top entries. If a graph-walking or hashing function ranks high despite sounding trivial, note it.
-
-### Function search and filtering
-
-Deep call graphs need filtering. Search for phase names you recognise from build logs (`optimizeChunkModules`, `codeGeneration`, `seal`) or for library paths (`webpack/lib/`).
-
-cpupro's search narrows the flamegraph to matching frames. Use it to confirm whether a suspect function is called thousands of times or only a handful.
+Sort by self-time and scan the top entries. If a graph-walking or hashing function ranks high despite sounding trivial, note it and cross-check call frequency in the call-frame view above.
 
 ## Step 4: Form a Hypothesis
 
@@ -128,10 +157,20 @@ A useful workflow:
 1. **Locate the stall** — find the widest time block in the flamegraph during the slow phase
 2. **Identify the hotspot** — bottom-up sort; note the top self-time functions
 3. **Check call frequency** — is the function invoked once or thousands of times?
-4. **Cross-reference graph shape** — externals count, chunk count, runtime count, plugin count
+4. **Cross-reference graph shape** — see below
 5. **State the hypothesis** — e.g. "Function X walks the module graph on every external entry; with N externals and M concatenated modules, that is N×M redundant traversals"
 
 A good hypothesis is falsifiable. You should be able to grep the source, read the call site, and confirm or reject it without guessing.
+
+### Cross-reference graph shape (concretely)
+
+Step 4 is where many profiles stall in the abstract. You need **counts** from the build, not guesses:
+
+- **Webpack stats JSON** — run `webpack --json > stats.json` on a representative config, or add [`webpack-stats-plugin`](https://github.com/FormidableLabs/webpack-stats-plugin) / `stats: { all: false, modules: true, chunks: true }` to your build and write the output to disk. From the stats object, count modules with `moduleType` / `identifier` indicating externals, total chunks, and compilation hash entries.
+- **cpupro call counts** — once you filter to a suspect function, check how many times it appears in the call tree. Thousands of invocations × non-trivial per-call work is the pattern behind most "cheap function, expensive build" bugs.
+- **Three-way attribution** — when a leaf function runs inside nested loops (externals × concatenated modules × runtimes), multiply the dimensions you can measure separately. A small script that reads stats JSON and prints `{ externals, concatenatedModules, runtimes }` is enough to turn "this walk feels redundant" into "this walk runs ~N×M times per build."
+
+If the product of those counts matches the order of magnitude of CPU time you see in the profile, you have a hypothesis worth reading source for.
 
 ### Example signals
 
@@ -141,6 +180,7 @@ A good hypothesis is falsifiable. You should be able to grep the source, read th
 | Wide plateau in one plugin's code path | Algorithmic cost in that plugin |
 | Flat distribution, no dominant function | Many small costs; consider a different approach (build cache, fewer entries) |
 | Gap with no samples | I/O wait or subprocess; profiling won't help |
+| Wide block under `next/dist/` with no webpack callees | Next.js pipeline overhead, not bundler config |
 
 ## Step 5: Validate Before Fixing
 
@@ -158,10 +198,11 @@ If the hypothesis holds, you have a targeted fix. If not, profile again after el
 1. **Profile production builds** — `yarn build:profile` with Node's `--cpu-prof` is enough to start
 2. **Use cpupro for large profiles** — better filtering and navigation than DevTools for webpack-scale builds
 3. **Bottom-up self-time finds loops** — the flamegraph shows structure; self-time finds repetition
-4. **End with a falsifiable hypothesis** — the profile tells you where to read code, not what to change
+4. **Separate Next.js from webpack** — framework frames in the profile are not automatically bundler bugs
+5. **End with a falsifiable hypothesis** — the profile tells you where to read code, not what to change
 
 ## What's Next
 
 This workflow is general. The same steps apply whether the hotspot is in your application bundler config, a webpack plugin, or upstream in webpack core.
 
-In a follow-up post, I walk through a concrete case: using this process to find a redundant `moduleGraph.isDeferred()` traversal in webpack's `ConcatenatedModule`, land [webpack#21096](https://github.com/webpack/webpack/pull/21096), and cut roughly 32% from a production build.
+In a follow-up post, I will walk through a concrete case: using this process to find a redundant `moduleGraph.isDeferred()` traversal in webpack's `ConcatenatedModule`, land [webpack#21096](https://github.com/webpack/webpack/pull/21096), and cut roughly 32% from a production build.
