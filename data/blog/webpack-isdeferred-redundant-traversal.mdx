@@ -10,7 +10,7 @@ images: ['/static/images/build-profile-before-overview.png']
 
 ## Introduction
 
-After [profiling a production build](/blogs/cpu-profiling-build-bottlenecks) on a large codebase with Module Federation, the bottom-up view pointed to `moduleGraph.isDeferred()` inside `ConcatenatedModule._getModulesWithInfo()`. The function was invoked thousands of times per build. Every call returned `false` — but only after walking the module's full incoming connection list.
+After [profiling a production build](/blogs/how-to-identify-build-time-bottlenecks-using-cpu-profiling) on a large codebase with Module Federation, the bottom-up view pointed to `moduleGraph.isDeferred()` inside `ConcatenatedModule._getModulesWithInfo()`. The function was invoked thousands of times per build. Every call returned `false` — but only after walking the module's full incoming connection list.
 
 The project never enabled `experiments.deferImport`. The traversal was provably redundant.
 
@@ -196,4 +196,4 @@ The after profile shows `isDeferred()` and `getIncomingConnections()` no longer 
 
 If your webpack build uses externals — federated remotes, CDN scripts, Node.js builtins inside concatenated scopes — and build time has grown quietly, profile it. The bottleneck may be in webpack core, not your application code.
 
-For the profiling workflow itself, see [How to Find Build-Time Bottlenecks Using CPU Profiling](/blogs/cpu-profiling-build-bottlenecks).
+For the profiling workflow itself, see [How to Identify Build-Time Bottlenecks Using CPU Profiling](/blogs/how-to-identify-build-time-bottlenecks-using-cpu-profiling).
