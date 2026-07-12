@@ -1,7 +1,7 @@
 ---
 title: 'Finding a Redundant Traversal in Webpack With CPU Profiling'
-date: '2026-07-05'
-lastmod: '2026-07-05'
+date: '2026-07-11'
+lastmod: '2026-07-11'
 tags: ['webpack', 'performance', 'cpu-profiling', 'module-federation', 'open-source']
 draft: true
 summary: 'How CPU profiling revealed an unguarded moduleGraph.isDeferred() call in webpack ConcatenatedModule, the fix that landed upstream in webpack >= 5.108.0, and roughly 11 minutes saved on a large Module Federation build.'
@@ -10,7 +10,7 @@ images: ['/static/images/build-profile-before-overview.png']
 
 ## Introduction
 
-After [profiling a production build](/blogs/how-to-identify-build-time-bottlenecks-using-cpu-profiling) on a large codebase with Module Federation, the bottom-up view pointed to `moduleGraph.isDeferred()` inside `ConcatenatedModule._getModulesWithInfo()`. The function was invoked thousands of times per build. Every call returned `false` — but only after walking the module's full incoming connection list.
+After [profiling a production build](/blogs/how-to-identify-build-time-bottlenecks-using-cpu-profiling) on a large Next.js project with Module Federation, the bottom-up view pointed to `moduleGraph.isDeferred()` inside `ConcatenatedModule._getModulesWithInfo()`. The function was invoked thousands of times per build. Every call returned `false` — but only after walking the module's full incoming connection list.
 
 The project never enabled `experiments.deferImport`. The traversal was provably redundant.
 
@@ -166,13 +166,12 @@ If you are on webpack **>= 5.108.0**, you already have the fix. Upgrade and re-p
 
 ## Results
 
-After applying the patch locally (before the release shipped), the stall disappeared. Total production build time dropped by roughly **11 minutes**.
+After applying the fix, total production build time dropped by roughly **11 minutes** (~32%).
 
 ### Before the fix
 
 ![cpupro overview before the fix — 37 minute build, isDeferred at 39.9% self-time](/static/images/build-profile-before-overview.png)
 
-- **Total runtime:** 2,212,722ms (~37 minutes)
 - **`isDeferred` self-time:** 450,113ms (39.9%) — the top hotspot
 - webpack package: 883,568ms self-time (39.9%)
 
@@ -180,7 +179,6 @@ After applying the patch locally (before the release shipped), the stall disappe
 
 ![cpupro overview after the fix — 26 minute build, isDeferred no longer in top entries](/static/images/build-profile-after-overview.png)
 
-- **Total runtime:** 1,581,306ms (~26 minutes)
 - **`isDeferred`:** no longer appears in the top self-time entries
 - webpack package: 388,059ms self-time (24.5%)
 

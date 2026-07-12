@@ -1,8 +1,8 @@
 {
-  "webpack": 2,
   "performance": 2,
   "cpu-profiling": 2,
+  "next-js": 1,
+  "webpack": 2,
   "module-federation": 1,
-  "open-source": 1,
-  "next-js": 1
+  "open-source": 1
 }
