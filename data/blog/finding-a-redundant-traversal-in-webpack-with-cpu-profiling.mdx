@@ -3,7 +3,7 @@ title: 'Finding a Redundant Traversal in Webpack With CPU Profiling'
 date: '2026-07-11'
 lastmod: '2026-07-11'
 tags: ['webpack', 'performance', 'cpu-profiling', 'module-federation', 'open-source']
-draft: true
+draft: false
 summary: 'How CPU profiling revealed an unguarded moduleGraph.isDeferred() call in webpack ConcatenatedModule, the fix that landed upstream in webpack >= 5.108.0, and roughly 11 minutes saved on a large Module Federation build.'
 images: ['/static/images/build-profile-before-overview.png']
 ---
@@ -172,7 +172,7 @@ After applying the fix, total production build time dropped by roughly **11 minu
 
 ![cpupro overview before the fix — 37 minute build, isDeferred at 39.9% self-time](/static/images/build-profile-before-overview.png)
 
-- **`isDeferred` self-time:** 450,113ms (39.9%) — the top hotspot
+- **`isDeferred` self-time:** 450,113ms (20.3%) — the top hotspot
 - webpack package: 883,568ms self-time (39.9%)
 
 ### After the fix
