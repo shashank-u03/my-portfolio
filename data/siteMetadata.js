@@ -10,7 +10,7 @@ const siteMetadata = {
   siteRepo: 'https://github.com/shashank-u03/my-portfolio',
   siteLogo: `${process.env.BASE_PATH || ''}/static/images/logo.png`,
   socialBanner: `${process.env.BASE_PATH || ''}/static/images/og-banner.png`,
-  email: 'shashanku0311@gmail.com',
+  email: 'shashankupadhyay.work@gmail.com',
   github: 'https://github.com/shashank-u03',
   linkedin: 'https://in.linkedin.com/in/shashankupadhyay1',
   googleScholar: 'https://scholar.google.com/citations?user=wka2RYAAAAAJ&hl=en&oi=ao',

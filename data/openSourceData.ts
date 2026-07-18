@@ -20,7 +20,7 @@ const openSourceData: OpenSourceContribution[] = [
     description:
       'Adds a skipFederatedStats option to NextFederationPlugin so CSR-only apps can opt out of generating federated-stats.json.',
     href: 'https://github.com/module-federation/core/pull/4732',
-    status: 'open',
+    status: 'merged',
     project: 'Module Federation',
   },
   {
